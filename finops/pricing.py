@@ -60,21 +60,60 @@ def break_even_utilization(discount_frac: float) -> float:
     return max(0.0, min(1.0, 1.0 - discount_frac))
 
 
-def recommend_tier(hours_per_day: float, interruptible: bool, reserved_discount: float = 0.45) -> str:
+def recommend_tier(
+    hours_per_day: float,
+    interruptible: bool,
+    reserved_discount: float = 0.45,
+    gpu_type: str | None = None,
+    job_days: int | None = None,
+) -> str:
     """Pick a purchasing tier from a workload's duty cycle + interruptibility.
 
     DOCUMENTED simple policy (instructor extension point — swap in your own):
       - interruptible & not 24/7  -> 'spot'      (checkpoint and ride the discount)
       - duty cycle >= break-even  -> 'reserved'  (steady, high utilization)
       - otherwise                 -> 'on_demand' (spiky / low duty)
+
+    Extension 1: Enhanced policy considering GPU-specific interruption risk and job duration.
     """
+    gpu_interruption_risk = {
+        "H100": 0.03,
+        "A100": 0.05,
+        "L4": 0.08,
+        "A10G": 0.15,
+        "T4": 0.20,
+    }
+
     duty = max(0.0, hours_per_day) / 24.0
     be = break_even_utilization(reserved_discount)
+
     if interruptible and hours_per_day < 24:
+        # High interruption risk GPUs with near continuous duty cycle benefit more from reserved
+        if gpu_type and gpu_interruption_risk.get(gpu_type, 0.05) > 0.12 and duty >= 0.75:
+            return "reserved"
         return "spot"
     if duty >= be:
         return "reserved"
     return "on_demand"
+
+
+def cache_is_worth_it(
+    avg_cache_reads: float,
+    write_cost_ratio: float = 1.0,
+    read_discount: float = 0.10,
+) -> bool:
+    """Extension 3: Check if prompt caching yields net savings.
+
+    Prompt caching incurs a creation/write fee. Caching is cost-effective only when:
+        avg_cache_reads * (1.0 - read_discount) > write_cost_ratio
+
+    Example: With 90% read discount (0.1x) and write cost equal to 1x input cost (1.0),
+    break-even occurs at > 1.11 reads per cached prompt.
+    """
+    savings_per_read = 1.0 - read_discount
+    if savings_per_read <= 0:
+        return False
+    return (avg_cache_reads * savings_per_read) > write_cost_ratio
 
 
 def spot_checkpoint_cost(

@@ -46,6 +46,41 @@ def run(verbose: bool = True) -> dict:
         on_demand = num(catalog_by_type()[s["gpu_type"]]["on_demand_hr"])
         idle_waste += metrics.idle_waste_usd(s["idle_hours"], on_demand)
 
+    # Extension 2: Right-sizing Analysis according to MBU and VRAM cost ($/GB-VRAM)
+    rightsizing_recs = []
+    cat = catalog_by_type()
+    for s in summary:
+        if s["gpu_id"] in [l["gpu_id"] for l in lies] or s["mbu"] < 0.50:
+            current_gtype = s["gpu_type"]
+            current_cost = num(cat[current_gtype]["on_demand_hr"])
+            current_hbm = num(cat[current_gtype]["hbm_gb"])
+            current_bw = num(cat[current_gtype]["peak_bw_tbs"])
+
+            # Find cheaper GPU in catalog with sufficient HBM or bandwidth
+            best_candidate = None
+            best_savings = 0.0
+            for gtype, row in cat.items():
+                if gtype == current_gtype:
+                    continue
+                cand_cost = num(row["on_demand_hr"])
+                cand_hbm = num(row["hbm_gb"])
+                cand_bw = num(row["peak_bw_tbs"])
+                # If workload achieved bandwidth <= candidate peak bandwidth
+                achieved_bw = current_bw * s["mbu"]
+                if cand_cost < current_cost and cand_bw >= achieved_bw and cand_hbm >= (current_hbm * 0.3):
+                    savings = (current_cost - cand_cost) * 24 * 30
+                    if savings > best_savings:
+                        best_savings = savings
+                        best_candidate = {
+                            "gpu_id": s["gpu_id"],
+                            "current_type": current_gtype,
+                            "recommended_type": gtype,
+                            "monthly_savings": round(savings, 2),
+                            "reason": f"Achieved BW ({achieved_bw:.2f} TB/s) fits inside {gtype} ({cand_bw} TB/s)",
+                        }
+            if best_candidate:
+                rightsizing_recs.append(best_candidate)
+
     if verbose:
         print("== M1 Efficiency Audit ==")
         print(f"{'GPU':14}{'type':7}{'util%':>7}{'MFU':>7}{'MBU':>7}{'idle_h':>8}")
@@ -54,8 +89,19 @@ def run(verbose: bool = True) -> dict:
         print(f"\nGPU-Util LIES (util>=90% but MFU<30%): {[l['gpu_id'] for l in lies]}")
         print(f"Idle waste (1 day): ${idle_waste:,.2f}  ->  ${idle_waste*30:,.0f}/month")
 
-    return {"summary": summary, "lies": lies, "idle_waste_daily": round(idle_waste, 2)}
+        if rightsizing_recs:
+            print("\n-- Extension 2: Right-Sizing Recommendations (MBU/VRAM Optimization) --")
+            for rec in rightsizing_recs:
+                print(f"[{rec['gpu_id']}] Downgrade {rec['current_type']} -> {rec['recommended_type']} | Save ${rec['monthly_savings']:,.2f}/mo ({rec['reason']})")
+
+    return {
+        "summary": summary,
+        "lies": lies,
+        "idle_waste_daily": round(idle_waste, 2),
+        "rightsizing_recs": rightsizing_recs,
+    }
 
 
 if __name__ == "__main__":
     run()
+
